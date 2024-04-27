@@ -1,6 +1,8 @@
 #![allow(deprecated)]
 
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion, Throughput};
+use codspeed_criterion_compat::{
+    criterion_group, criterion_main, BatchSize, Criterion, Throughput,
+};
 use libsql::Database;
 use pprof::criterion::{Output, PProfProfiler};
 use tokio::runtime;
