@@ -137,6 +137,7 @@ impl Options {
         let secret_access_key = self.secret_access_key.clone().ok_or(anyhow!(
             "LIBSQL_BOTTOMLESS_AWS_SECRET_ACCESS_KEY was not set"
         ))?;
+        let session_token: Option<String> = self.session_token.clone();
         let conf = loader
             .behavior_version(BehaviorVersion::latest())
             .region(Region::new(region))
