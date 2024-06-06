@@ -3624,6 +3624,7 @@ name = "libsql-wal"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "async-stream",
  "bytes",
  "chrono",
  "crc32fast",
@@ -3644,6 +3645,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-stream",
  "tracing",
  "uuid",
  "walkdir",
