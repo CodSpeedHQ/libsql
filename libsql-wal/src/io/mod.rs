@@ -9,12 +9,14 @@ pub use self::file::FileExt;
 
 pub mod buf;
 pub mod file;
+pub mod compat;
 
 pub trait Io: Send + Sync + 'static {
     type File: FileExt;
     type TempFile: FileExt;
 
     fn create_dir_all(&self, path: &Path) -> io::Result<()>;
+    /// TODO: when adding an async variant make sure all places where async is needed are replaced
     fn open(
         &self,
         create_new: bool,
