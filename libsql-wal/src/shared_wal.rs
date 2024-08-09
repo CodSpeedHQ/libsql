@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -8,6 +8,7 @@ use crossbeam::deque::Injector;
 use crossbeam::sync::Unparker;
 use parking_lot::{Mutex, MutexGuard};
 use tokio::sync::mpsc;
+use uuid::Uuid;
 
 use crate::checkpointer::CheckpointMessage;
 use crate::error::{Error, Result};
@@ -51,6 +52,8 @@ pub struct SharedWal<IO: Io> {
     pub(crate) stored_segments: Box<dyn ReplicateFromStorage>,
     pub(crate) shutdown: AtomicBool,
     pub(crate) checkpoint_notifier: mpsc::Sender<CheckpointMessage>,
+    /// maximum size the segment is allowed to grow
+    pub(crate) max_segment_size: AtomicUsize,
 }
 
 impl<IO: Io> SharedWal<IO> {
@@ -71,6 +74,10 @@ impl<IO: Io> SharedWal<IO> {
 
     pub fn db_size(&self) -> u32 {
         self.current.load().db_size()
+    }
+
+    pub fn log_id(&self) -> Uuid {
+        self.current.load().log_id()
     }
 
     #[tracing::instrument(skip_all)]
@@ -230,21 +237,6 @@ impl<IO: Io> SharedWal<IO> {
             }
         }
 
-        // The replication index from page 1 must match that of the SharedWal
-        #[cfg(debug_assertions)]
-        {
-            use libsql_sys::ffi::Sqlite3DbHeader;
-            use zerocopy::FromBytes;
-
-            if page_no == 1 {
-                let header = Sqlite3DbHeader::read_from_prefix(buffer).unwrap();
-                assert_eq!(
-                    header.replication_index.get(),
-                    self.checkpointed_frame_no.load(Ordering::Relaxed)
-                );
-            }
-        }
-
         tx.pages_read += 1;
 
         Ok(())
@@ -264,7 +256,7 @@ impl<IO: Io> SharedWal<IO> {
         }
 
         // TODO: use config for max log size
-        if tx.is_commited() && current.count_committed() > 1000 {
+        if tx.is_commited() && current.count_committed() > self.max_segment_size.load(Ordering::Relaxed) {
             self.swap_current(&tx)?;
         }
 
@@ -297,8 +289,9 @@ impl<IO: Io> SharedWal<IO> {
             .current
             .load()
             .tail()
-            .checkpoint(&self.db_file, durable_frame_no)
+            .checkpoint(&self.db_file, durable_frame_no, self.log_id())
             .await?;
+        dbg!(checkpointed_frame_no);
         if let Some(checkpointed_frame_no) = checkpointed_frame_no {
             self.checkpointed_frame_no
                 .store(checkpointed_frame_no, Ordering::SeqCst);

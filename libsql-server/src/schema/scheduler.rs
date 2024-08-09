@@ -10,7 +10,6 @@ use tokio::task::JoinSet;
 
 use crate::connection::program::Program;
 use crate::connection::{Connection, MakeConnection};
-use crate::database::PrimaryConnectionMaker;
 use crate::namespace::meta_store::{MetaStore, MetaStoreConnection};
 use crate::namespace::{NamespaceName, NamespaceStore};
 use crate::query_result_builder::{IgnoreResult, QueryBuilderConfig};
@@ -349,10 +348,8 @@ impl Scheduler {
             let (connection_maker, block_writes) =
                 self.namespace_store
                     .with(task.namespace(), move |ns| {
-                        let db = ns.db.as_primary().expect(
-                            "attempting to perform schema migration on non-primary database",
-                        );
-                        (db.connection_maker().clone(), db.block_writes.clone())
+                        assert!(ns.db.is_primary(), "attempting to perform schema migration on non-primary database");
+                        (ns.db.connection_maker().clone(), ns.db.block_writes().unwrap())
                     })
                     .await
                     .map_err(|e| Error::NamespaceLoad(Box::new(e)))?;
@@ -426,7 +423,7 @@ async fn try_step_task(
     _permit: OwnedSemaphorePermit,
     namespace_store: NamespaceStore,
     migration_db: Arc<Mutex<MetaStoreConnection>>,
-    connection_maker: Arc<PrimaryConnectionMaker>,
+    connection_maker: Arc<dyn MakeConnection<Connection = crate::database::Connection>>,
     job_status: MigrationJobStatus,
     migration: Arc<Program>,
     mut task: MigrationTask,
@@ -477,7 +474,7 @@ async fn try_step_task(
 
 async fn try_step_task_inner(
     namespace_store: NamespaceStore,
-    connection_maker: Arc<PrimaryConnectionMaker>,
+    connection_maker: Arc<dyn MakeConnection<Connection = crate::database::Connection>>,
     job_status: MigrationJobStatus,
     migration: Arc<Program>,
     task: &MigrationTask,
@@ -739,11 +736,8 @@ async fn step_job_run_success(
         // TODO: check that all tasks actually reported success before migration
         let connection_maker = namespace_store
             .with(schema.clone(), |ns| {
-                ns.db
-                    .as_schema()
-                    .expect("expected database to be a schema database")
-                    .connection_maker()
-                    .clone()
+                assert!(ns.db.is_schema(), "expected database to be a schema database");
+                ns.db.connection_maker()
             })
             .await
             .map_err(|e| Error::NamespaceLoad(Box::new(e)))?;
@@ -754,7 +748,6 @@ async fn step_job_run_success(
             .map_err(|e| Error::FailedToConnect(schema.clone(), e.into()))?;
         tokio::task::spawn_blocking(move || -> Result<(), Error> {
             connection
-                .connection()
                 .with_raw(|conn| -> Result<(), Error> {
                     let mut txn = conn.transaction()?;
                     let schema_version =
@@ -809,7 +802,7 @@ mod test {
     use crate::connection::config::DatabaseConfig;
     use crate::database::DatabaseKind;
     use crate::namespace::configurator::{
-        BaseNamespaceConfig, NamespaceConfigurators, PrimaryConfigurator, PrimaryExtraConfig,
+        BaseNamespaceConfig, NamespaceConfigurators, PrimaryConfigurator, PrimaryConfig,
         SchemaConfigurator,
     };
     use crate::namespace::meta_store::{metastore_connection_maker, MetaStore};
@@ -863,9 +856,10 @@ mod test {
 
         let (block_write, ns_conn_maker) = store
             .with("ns".into(), |ns| {
+                assert!(ns.db.is_primary());
                 (
-                    ns.db.as_primary().unwrap().block_writes.clone(),
-                    ns.db.as_primary().unwrap().connection_maker(),
+                    ns.db.block_writes().unwrap(),
+                    ns.db.connection_maker(),
                 )
             })
             .await
@@ -920,7 +914,7 @@ mod test {
             encryption_config: None,
         };
 
-        let primary_config = PrimaryExtraConfig {
+        let primary_config = PrimaryConfig {
             max_log_size: 1000000000,
             max_log_duration: None,
             bottomless_replication: None,
@@ -989,9 +983,10 @@ mod test {
 
             let (block_write, ns_conn_maker) = store
                 .with("ns".into(), |ns| {
+                    assert!(ns.db.is_primary());
                     (
-                        ns.db.as_primary().unwrap().block_writes.clone(),
-                        ns.db.as_primary().unwrap().connection_maker(),
+                        ns.db.block_writes().unwrap(),
+                        ns.db.connection_maker(),
                     )
                 })
                 .await
@@ -1040,12 +1035,13 @@ mod test {
 
         store
             .with("ns".into(), |ns| {
+                assert!(ns.db.is_primary());
                 assert!(ns
                     .db
-                    .as_primary()
+                    .block_writes()
                     .unwrap()
-                    .block_writes
-                    .load(std::sync::atomic::Ordering::Relaxed));
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                );
             })
             .await
             .unwrap();

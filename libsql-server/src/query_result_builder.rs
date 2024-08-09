@@ -525,7 +525,6 @@ impl<B: QueryResultBuilder> QueryResultBuilder for Take<B> {
 pub mod test {
     use std::fmt;
 
-    use crate::connection::program::Program;
     use arbitrary::{Arbitrary, Unstructured};
     use itertools::Itertools;
     use rand::{
@@ -1037,14 +1036,14 @@ pub mod test {
 
     pub fn test_driver(
         iter: usize,
-        f: impl Fn(FsmQueryBuilder) -> crate::Result<(FsmQueryBuilder, Program)>,
+        f: impl Fn(FsmQueryBuilder) -> crate::Result<FsmQueryBuilder>,
     ) {
         for _ in 0..iter {
             // inject random errors
             let builder = FsmQueryBuilder::new(true);
             match f(builder) {
                 Ok(b) => {
-                    assert_eq!(b.0.state, Finish);
+                    assert_eq!(b.state, Finish);
                 }
                 Err(e) => {
                     assert!(matches!(e, crate::Error::BuilderError(_)));

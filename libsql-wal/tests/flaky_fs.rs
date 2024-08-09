@@ -144,10 +144,6 @@ impl Io for FlakyIo {
         todo!()
     }
 
-    fn uuid(&self) -> uuid::Uuid {
-        todo!()
-    }
-
     fn hard_link(&self, _src: &Path, _dst: &Path) -> std::io::Result<()> {
         todo!()
     }

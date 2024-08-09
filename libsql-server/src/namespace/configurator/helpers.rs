@@ -17,7 +17,7 @@ use tokio_util::io::StreamReader;
 
 use crate::connection::config::DatabaseConfig;
 use crate::connection::connection_manager::InnerWalManager;
-use crate::connection::libsql::{open_conn, MakeLibSqlConn};
+use crate::connection::legacy::{open_conn, MakeLegacyConnection};
 use crate::connection::{Connection as _, MakeConnection as _};
 use crate::database::{PrimaryConnection, PrimaryConnectionMaker};
 use crate::error::LoadDumpError;
@@ -32,14 +32,14 @@ use crate::replication::{FrameNo, ReplicationLogger};
 use crate::stats::Stats;
 use crate::{StatsSender, BLOCKING_RT, DB_CREATE_TIMEOUT, DEFAULT_AUTO_CHECKPOINT};
 
-use super::{BaseNamespaceConfig, PrimaryExtraConfig};
+use super::{BaseNamespaceConfig, PrimaryConfig};
 
 const WASM_TABLE_CREATE: &str =
     "CREATE TABLE libsql_wasm_func_table (name text PRIMARY KEY, body text) WITHOUT ROWID;";
 
 #[tracing::instrument(skip_all)]
 pub(super) async fn make_primary_connection_maker(
-    primary_config: &PrimaryExtraConfig,
+    primary_config: &PrimaryConfig,
     base_config: &BaseNamespaceConfig,
     meta_store_handle: &MetaStoreHandle,
     db_path: &Path,
@@ -125,7 +125,7 @@ pub(super) async fn make_primary_connection_maker(
 
     tracing::debug!("Opening libsql connection");
 
-    let connection_maker = MakeLibSqlConn::new(
+    let connection_maker = MakeLegacyConnection::new(
         db_path.to_path_buf(),
         wal_wrapper.clone(),
         stats.clone(),
@@ -421,7 +421,7 @@ async fn run_storage_monitor(
 
 pub(super) async fn cleanup_primary(
     base: &BaseNamespaceConfig,
-    primary_config: &PrimaryExtraConfig,
+    primary_config: &PrimaryConfig,
     namespace: &NamespaceName,
     db_config: &DatabaseConfig,
     prune_all: bool,

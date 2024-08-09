@@ -57,6 +57,10 @@ impl NamespaceName {
         unsafe { std::str::from_utf8_unchecked(&self.0) }
     }
 
+    pub fn bytes(&self) -> Bytes {
+        self.0.clone()
+    }
+
     pub fn from_bytes(bytes: Bytes) -> crate::Result<Self> {
         let s = std::str::from_utf8(&bytes).map_err(|_| Error::InvalidNamespace)?;
         Self::validate(s)?;

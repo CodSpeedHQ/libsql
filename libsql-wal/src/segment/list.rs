@@ -4,11 +4,11 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
-use fst::map::{OpBuilder, Union};
 use fst::raw::IndexedValue;
 use fst::Streamer;
 use roaring::RoaringBitmap;
 use tokio_stream::Stream;
+use uuid::Uuid;
 use zerocopy::FromZeroes;
 
 use crate::error::Result;
@@ -78,7 +78,12 @@ where
 
     /// Checkpoints as many segments as possible to the main db file, and return the checkpointed
     /// frame_no, if anything was checkpointed
-    pub async fn checkpoint<F>(&self, db_file: &F, until_frame_no: u64) -> Result<Option<u64>>
+    pub async fn checkpoint<F>(
+        &self,
+        db_file: &F,
+        until_frame_no: u64,
+        log_id: Uuid,
+        ) -> Result<Option<u64>>
     where
         F: FileExt,
     {
@@ -122,24 +127,15 @@ where
 
         let size_after = segs.first().unwrap().size_after();
 
-        let union = segs
+        let index_iter = segs
             .iter()
-            .map(|s| s.index())
-            .collect::<OpBuilder>()
-            .union();
+            .map(|s| s.index());
 
-        /// Safety: Union contains a Box<dyn trait> that doesn't require Send, to it's not send.
-        /// That's an issue for us, but all the indexes we have are safe to send, so we're good.
-        /// FIXME: we could implement union ourselves.
-        unsafe impl Send for SendUnion<'_> {}
-        unsafe impl Sync for SendUnion<'_> {}
-        struct SendUnion<'a>(Union<'a>);
-
-        let mut union = SendUnion(union);
+        let mut union = send_fst_ops::SendUnion::from_index_iter(index_iter);
 
         let mut buf = ZeroCopyBuf::<Frame>::new_uninit();
         let mut last_replication_index = 0;
-        while let Some((k, v)) = union.0.next() {
+        while let Some((k, v)) = union.next() {
             let page_no = u32::from_be_bytes(k.try_into().unwrap());
             let v = v.iter().min_by_key(|i| i.index).unwrap();
             let offset = v.value as u32;
@@ -163,6 +159,7 @@ where
             magic: LIBSQL_MAGIC.into(),
             version: LIBSQL_WAL_VERSION.into(),
             replication_index: last_replication_index.into(),
+            log_id: log_id.as_u128().into(),
         };
 
         let footer_offset = size_after as usize * LIBSQL_PAGE_SIZE as usize;
@@ -241,7 +238,8 @@ where
             .max(until_fno);
 
         let stream = async_stream::try_stream! {
-            let mut union = fst::map::OpBuilder::from_iter(segments.iter().map(|s| s.index())).union();
+            let index_iter = segments.iter().map(|s| s.index());
+            let mut union = send_fst_ops::SendUnion::from_index_iter(index_iter);
             while let Some((key_bytes, indexes)) = union.next() {
                 let page_no = u32::from_be_bytes(key_bytes.try_into().unwrap());
                 // we already have a more recent version of this page.
@@ -335,6 +333,47 @@ impl<T> List<T> {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+}
+
+mod send_fst_ops {
+    use std::sync::Arc;
+    use std::ops::{Deref, DerefMut};
+
+    use fst::map::{OpBuilder, Union};
+
+    /// Safety: Union contains a Box<dyn trait> that doesn't require Send, to it's not send.
+    /// That's an issue for us, but all the indexes we have are safe to send, so we're good.
+    /// FIXME: we could implement union ourselves.
+    unsafe impl Send for SendUnion<'_> {}
+    unsafe impl Sync for SendUnion<'_> {}
+
+    #[repr(transparent)]
+    pub(super) struct SendUnion<'a>(Union<'a>);
+
+    impl<'a> SendUnion<'a> {
+        pub fn from_index_iter<I>(iter: I) -> Self
+            where
+            I: Iterator<Item = &'a fst::map::Map<Arc<[u8]>>>,
+        {
+            let op = iter.collect::<OpBuilder>().union();
+            Self(op)
+        }
+    }
+
+    impl<'a> Deref for SendUnion<'a> {
+        type Target = Union<'a>;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    impl<'a> DerefMut for SendUnion<'a> {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.0
+        }
+    }
+
 }
 
 #[cfg(test)]

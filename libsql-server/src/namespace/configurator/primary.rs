@@ -9,7 +9,7 @@ use tokio::task::JoinSet;
 
 use crate::connection::config::DatabaseConfig;
 use crate::connection::connection_manager::InnerWalManager;
-use crate::connection::MakeConnection;
+use crate::connection::{Connection as _, MakeConnection};
 use crate::database::{Database, PrimaryDatabase};
 use crate::namespace::broadcasters::BroadcasterHandle;
 use crate::namespace::configurator::helpers::make_primary_connection_maker;
@@ -22,18 +22,18 @@ use crate::run_periodic_checkpoint;
 use crate::schema::{has_pending_migration_task, setup_migration_table};
 
 use super::helpers::cleanup_primary;
-use super::{BaseNamespaceConfig, ConfigureNamespace, PrimaryExtraConfig};
+use super::{BaseNamespaceConfig, ConfigureNamespace, PrimaryConfig};
 
 pub struct PrimaryConfigurator {
     base: BaseNamespaceConfig,
-    primary_config: PrimaryExtraConfig,
+    primary_config: PrimaryConfig,
     make_wal_manager: Arc<dyn Fn() -> InnerWalManager + Sync + Send + 'static>,
 }
 
 impl PrimaryConfigurator {
     pub fn new(
         base: BaseNamespaceConfig,
-        primary_config: PrimaryExtraConfig,
+        primary_config: PrimaryConfig,
         make_wal_manager: Arc<dyn Fn() -> InnerWalManager + Sync + Send + 'static>,
     ) -> Self {
         Self {

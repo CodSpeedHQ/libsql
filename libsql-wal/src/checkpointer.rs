@@ -158,6 +158,7 @@ where
             notified = self.recv.recv(), if !self.shutting_down => {
                 match notified {
                     Some(CheckpointMessage::Namespace(namespace)) => {
+                        tracing::info!(namespace = namespace.as_str(), "notified for checkpoint");
                         self.scheduled.insert(namespace);
                     }
                     None | Some(CheckpointMessage::Shutdown) => {

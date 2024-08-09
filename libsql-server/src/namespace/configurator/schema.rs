@@ -14,11 +14,11 @@ use crate::namespace::{
 use crate::schema::SchedulerHandle;
 
 use super::helpers::{cleanup_primary, make_primary_connection_maker};
-use super::{BaseNamespaceConfig, ConfigureNamespace, PrimaryExtraConfig};
+use super::{BaseNamespaceConfig, ConfigureNamespace, PrimaryConfig};
 
 pub struct SchemaConfigurator {
     base: BaseNamespaceConfig,
-    primary_config: PrimaryExtraConfig,
+    primary_config: PrimaryConfig,
     make_wal_manager: Arc<dyn Fn() -> InnerWalManager + Sync + Send + 'static>,
     migration_scheduler: SchedulerHandle,
 }
@@ -26,7 +26,7 @@ pub struct SchemaConfigurator {
 impl SchemaConfigurator {
     pub fn new(
         base: BaseNamespaceConfig,
-        primary_config: PrimaryExtraConfig,
+        primary_config: PrimaryConfig,
         make_wal_manager: Arc<dyn Fn() -> InnerWalManager + Sync + Send + 'static>,
         migration_scheduler: SchedulerHandle,
     ) -> Self {
@@ -76,8 +76,8 @@ impl ConfigureNamespace for SchemaConfigurator {
                 db: Database::Schema(SchemaDatabase::new(
                     self.migration_scheduler.clone(),
                     name.clone(),
-                    connection_maker,
-                    wal_manager,
+                    Arc::new(connection_maker),
+                    Some(wal_manager),
                     db_config.clone(),
                 )),
                 name: name.clone(),
