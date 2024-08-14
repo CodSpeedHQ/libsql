@@ -109,7 +109,6 @@ impl<IO: Io> SharedWal<IO> {
             match tx {
                 Transaction::Write(_) => unreachable!("already in a write transaction"),
                 Transaction::Read(read_tx) => {
-                    {
                         let mut reserved = self.wal_lock.reserved.lock();
                         match *reserved {
                             // we have already reserved the slot, go ahead and try to acquire
@@ -117,33 +116,31 @@ impl<IO: Io> SharedWal<IO> {
                                 tracing::trace!("taking reserved slot");
                                 reserved.take();
                                 let lock = self.wal_lock.tx_id.lock_blocking();
+                                assert!(lock.is_none());
                                 let write_tx = self.acquire_write(read_tx, lock, reserved)?;
                                 *tx = Transaction::Write(write_tx);
                                 return Ok(());
                             }
+                            None => {
+                                let lock = self.wal_lock.tx_id.lock_blocking();
+                                if lock.is_none() && self.wal_lock.waiters.is_empty() {
+                                    let write_tx = self.acquire_write(read_tx, lock, reserved)?;
+                                    *tx = Transaction::Write(write_tx);
+                                    return Ok(());
+                                }
+                            }
                             _ => (),
                         }
-                    }
 
-                    let lock = self.wal_lock.tx_id.lock_blocking();
-                    match *lock {
-                        None if self.wal_lock.waiters.is_empty() => {
-                            let write_tx =
-                                self.acquire_write(read_tx, lock, self.wal_lock.reserved.lock())?;
-                            *tx = Transaction::Write(write_tx);
-                            return Ok(());
-                        }
-                        Some(_) | None => {
-                            tracing::trace!(
-                                "txn currently held by another connection, registering to wait queue"
-                            );
-                            let parker = crossbeam::sync::Parker::new();
-                            let unparker = parker.unparker().clone();
-                            self.wal_lock.waiters.push((unparker, read_tx.conn_id));
-                            drop(lock);
-                            parker.park();
-                        }
-                    }
+                    tracing::trace!(
+                        "txn currently held by another connection, registering to wait queue"
+                    );
+
+                    let parker = crossbeam::sync::Parker::new();
+                    let unparker = parker.unparker().clone();
+                    self.wal_lock.waiters.push((unparker, read_tx.conn_id));
+                    drop(reserved);
+                    parker.park();
                 }
             }
         }
@@ -155,7 +152,7 @@ impl<IO: Io> SharedWal<IO> {
         mut tx_id_lock: async_lock::MutexGuard<Option<u64>>,
         mut reserved: MutexGuard<Option<u64>>,
     ) -> Result<WriteTransaction<IO::File>> {
-        assert!(reserved.is_none() || *reserved == Some(read_tx.conn_id), "{}", dbg!(reserved.is_none()) || dbg!(*reserved == Some(read_tx.conn_id)));
+        assert!(reserved.is_none() || *reserved == Some(read_tx.conn_id));
         assert!(tx_id_lock.is_none());
         // we read two fields in the header. There is no risk that a transaction commit in
         // between the two reads because this would require that:
@@ -294,7 +291,6 @@ impl<IO: Io> SharedWal<IO> {
             .tail()
             .checkpoint(&self.db_file, durable_frame_no, self.log_id(), &self.io)
             .await?;
-        dbg!(checkpointed_frame_no);
         if let Some(checkpointed_frame_no) = checkpointed_frame_no {
             self.checkpointed_frame_no
                 .store(checkpointed_frame_no, Ordering::SeqCst);

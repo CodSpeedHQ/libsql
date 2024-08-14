@@ -416,6 +416,12 @@ mod test {
             {
                 todo!()
             }
+
+            fn destroy<IO: Io>(&self, _io: &IO) -> impl std::future::Future<Output = ()> {
+                async move {
+                    todo!()
+                }
+            }
         }
 
         struct TestBackend;

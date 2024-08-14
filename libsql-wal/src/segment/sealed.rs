@@ -210,6 +210,7 @@ impl<F: FileExt> SealedSegment<F> {
 
         // This happens in case of crash: the segment is not empty, but it wasn't sealed. We need to
         // recover the index, and seal the segment.
+        // FIXME: we have a bung here
         if !header.flags().contains(SegmentFlags::SEALED) {
             assert_eq!(header.index_offset.get(), 0);
             return Self::recover(file, path, header).map(Some);

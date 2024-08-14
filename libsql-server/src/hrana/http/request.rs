@@ -62,6 +62,7 @@ async fn try_handle(
     Ok(match request {
         proto::StreamRequest::None => bail!(ProtocolError::NoneStreamRequest),
         proto::StreamRequest::Close(_req) => {
+            dbg!();
             stream_guard.close_db();
             proto::StreamResponse::Close(proto::CloseStreamResp {})
         }

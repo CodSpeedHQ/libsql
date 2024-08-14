@@ -36,9 +36,9 @@ struct Cookie {
     base_url: Option<String>,
 }
 
-pub trait HttpSend: Clone {
-    type Stream: Stream<Item = std::io::Result<Bytes>> + Unpin;
-    type Result: Future<Output = Result<Self::Stream>>;
+pub trait HttpSend: Clone + Send + 'static {
+    type Stream: Stream<Item = std::io::Result<Bytes>> + Unpin + Send;
+    type Result: Future<Output = Result<Self::Stream>> + Send;
     fn http_send(&self, url: Arc<str>, auth: Arc<str>, body: String) -> Self::Result;
 
     /// Schedule sending a HTTP post request without waiting for the completion.

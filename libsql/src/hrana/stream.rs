@@ -68,7 +68,7 @@ where
                     auth_token,
                     sql_id_generator: 0,
                     baton: None,
-                }),
+                }).into(),
             }),
         }
     }
@@ -287,8 +287,9 @@ where
     total_changes: AtomicU64,
     last_insert_rowid: AtomicI64,
     is_autocommit: AtomicBool,
-    stream: Mutex<RawStream<T>>,
+    stream: Arc<Mutex<RawStream<T>>>,
 }
+
 
 #[derive(Debug)]
 struct RawStream<T>
@@ -401,6 +402,15 @@ where
         Ok(responses)
     }
 
+    async fn close_stream(&mut self) -> Result<()> {
+        self
+            .send_requests([
+                StreamRequest::Close(CloseStreamReq {}),
+            ])
+            .await?;
+        Ok(())
+    }
+
     async fn finalize(&mut self, req: StreamRequest) -> Result<(StreamResponse, bool)> {
         let [resp, get_autocommit, _] = self
             .send_requests([
@@ -441,6 +451,7 @@ where
     T: HttpSend,
 {
     fn drop(&mut self) {
+        dbg!();
         if let Some(baton) = self.baton.take() {
             // only send a close request if stream was ever used to send the data
             tracing::trace!("closing client stream (baton: `{}`)", baton);
@@ -449,6 +460,7 @@ where
                 requests: vec![StreamRequest::Close(CloseStreamReq {})],
             })
             .unwrap();
+            dbg!();
             self.client
                 .clone()
                 .oneshot(self.pipeline_url.clone(), self.auth_token.clone(), req);

@@ -769,7 +769,6 @@ where
             );
             builder.set_credentials_provider(Some(SharedCredentialsProvider::new(cred)));
             let config = builder.build();
-            dbg!(&config);
             let backend = S3Backend::from_sdk_config(
                 config,
                 opt.bucket_name.clone(),
@@ -791,7 +790,7 @@ where
             Either::B(NoStorage)
         };
 
-        if dbg!(self.rpc_server_config.is_some()) && dbg!(matches!(storage, Either::B(_))) {
+        if self.rpc_server_config.is_some() && matches!(storage, Either::B(_)) {
             anyhow::bail!("replication without bottomless not supported yet");
         }
 
