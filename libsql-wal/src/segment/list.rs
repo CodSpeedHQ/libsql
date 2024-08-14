@@ -13,7 +13,7 @@ use zerocopy::FromZeroes;
 
 use crate::error::Result;
 use crate::io::buf::{ZeroCopyBoxIoBuf, ZeroCopyBuf};
-use crate::io::FileExt;
+use crate::io::{FileExt, Io};
 use crate::segment::Frame;
 use crate::{LibsqlFooter, LIBSQL_MAGIC, LIBSQL_PAGE_SIZE, LIBSQL_WAL_VERSION};
 
@@ -78,14 +78,13 @@ where
 
     /// Checkpoints as many segments as possible to the main db file, and return the checkpointed
     /// frame_no, if anything was checkpointed
-    pub async fn checkpoint<F>(
+    pub async fn checkpoint<IO: Io>(
         &self,
-        db_file: &F,
+        db_file: &IO::File,
         until_frame_no: u64,
         log_id: Uuid,
-        ) -> Result<Option<u64>>
-    where
-        F: FileExt,
+        io: &IO,
+        ) -> Result<Option<u64>> 
     {
         struct Guard<'a>(&'a AtomicBool);
         impl<'a> Drop for Guard<'a> {
@@ -170,8 +169,12 @@ where
 
         // todo: truncate if necessary
 
-        //// todo: make async
+        //// TODO: make async
         db_file.sync_all()?;
+
+        for seg in segs.iter() {
+            seg.destroy(io).await;
+        }
 
         let mut current = self.head.compare_and_swap(&segs[0], None);
         if Arc::ptr_eq(&segs[0], current.as_ref().unwrap()) {

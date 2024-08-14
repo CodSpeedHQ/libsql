@@ -54,6 +54,7 @@ pub struct SharedWal<IO: Io> {
     pub(crate) checkpoint_notifier: mpsc::Sender<CheckpointMessage>,
     /// maximum size the segment is allowed to grow
     pub(crate) max_segment_size: AtomicUsize,
+    pub(crate) io: Arc<IO>,
 }
 
 impl<IO: Io> SharedWal<IO> {
@@ -154,6 +155,8 @@ impl<IO: Io> SharedWal<IO> {
         mut tx_id_lock: async_lock::MutexGuard<Option<u64>>,
         mut reserved: MutexGuard<Option<u64>>,
     ) -> Result<WriteTransaction<IO::File>> {
+        assert!(reserved.is_none() || *reserved == Some(read_tx.conn_id), "{}", dbg!(reserved.is_none()) || dbg!(*reserved == Some(read_tx.conn_id)));
+        assert!(tx_id_lock.is_none());
         // we read two fields in the header. There is no risk that a transaction commit in
         // between the two reads because this would require that:
         // 1) there would be a running txn
@@ -289,7 +292,7 @@ impl<IO: Io> SharedWal<IO> {
             .current
             .load()
             .tail()
-            .checkpoint(&self.db_file, durable_frame_no, self.log_id())
+            .checkpoint(&self.db_file, durable_frame_no, self.log_id(), &self.io)
             .await?;
         dbg!(checkpointed_frame_no);
         if let Some(checkpointed_frame_no) = checkpointed_frame_no {
