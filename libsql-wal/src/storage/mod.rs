@@ -185,6 +185,8 @@ pub trait Storage: Send + Sync + 'static {
         key: &SegmentKey,
         config_override: Option<Self::Config>,
     ) -> impl Future<Output = Result<CompactedSegment<impl FileExt>>> + Send;
+
+    fn shutdown(&self) -> impl Future<Output = ()> + Send { async { dbg!(()) } }
 }
 
 /// special zip function for Either storage implementation
@@ -302,6 +304,13 @@ where A: Storage<Segment = S>,
                     Ok(seg)
                 },
             }
+        }
+    }
+
+    async fn shutdown(&self) {
+        match self {
+            Either::A(a) => a.shutdown().await,
+            Either::B(b) => b.shutdown().await,
         }
     }
 }

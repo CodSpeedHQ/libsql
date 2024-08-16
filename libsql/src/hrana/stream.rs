@@ -451,7 +451,6 @@ where
     T: HttpSend,
 {
     fn drop(&mut self) {
-        dbg!();
         if let Some(baton) = self.baton.take() {
             // only send a close request if stream was ever used to send the data
             tracing::trace!("closing client stream (baton: `{}`)", baton);
@@ -460,7 +459,6 @@ where
                 requests: vec![StreamRequest::Close(CloseStreamReq {})],
             })
             .unwrap();
-            dbg!();
             self.client
                 .clone()
                 .oneshot(self.pipeline_url.clone(), self.auth_token.clone(), req);

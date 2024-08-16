@@ -170,7 +170,7 @@ where
         namespace: &NamespaceName,
     ) -> Result<Arc<SharedWal<IO>>> {
         if self.shutdown.load(Ordering::SeqCst) {
-            todo!("open after shutdown");
+            return Err(crate::error::Error::ShuttingDown)
         }
 
         loop {
@@ -350,6 +350,7 @@ where
     // On shutdown, we checkpoint all the WALs. This require sealing the current segment, and when
     // checkpointing all the segments
     pub async fn shutdown(self: Arc<Self>) -> Result<()> {
+        tracing::info!("shutting down registry");
         self.shutdown.store(true, Ordering::SeqCst);
 
         let mut join_set = JoinSet::<Result<()>>::new();
@@ -388,7 +389,12 @@ where
         }
 
         while join_set.join_next().await.is_some() {}
+        dbg!();
 
+        // we process any pending storage job, then checkpoint everything
+        self.storage.shutdown().await;
+
+        dbg!();
         // wait for checkpointer to exit
         let _ = self
             .checkpoint_notifier
@@ -396,8 +402,7 @@ where
             .await;
         self.checkpoint_notifier.closed().await;
 
-        // todo: shutdown storage
-        // self.storage.shutdown().await;
+        tracing::info!("registry shutdown gracefully");
 
         Ok(())
     }

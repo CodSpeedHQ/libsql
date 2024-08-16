@@ -32,7 +32,7 @@ use aws_smithy_runtime::client::http::hyper_014::HyperClientBuilder;
 use config::{
     AdminApiConfig, DbConfig, HeartbeatConfig, RpcClientConfig, RpcServerConfig, UserApiConfig,
 };
-use futures::future::{pending, ready};
+use futures::future::ready;
 use futures::Future;
 use http::user::UserApi;
 use hyper::client::HttpConnector;
@@ -208,7 +208,75 @@ struct Services<A, P, S, C> {
     disable_default_namespace: bool,
     db_config: DbConfig,
     user_auth_strategy: Auth,
+}
+
+struct TaskManager {
+    join_set: JoinSet<anyhow::Result<()>>,
     shutdown: Arc<Notify>,
+}
+
+impl TaskManager {
+    /// pass a shutdown notifier to the task. The task must shutdown upon receiving a signal
+    pub fn spawn_with_shutdown_notify<F, Fut>(&mut self, f: F)
+        where F: FnOnce(Arc<Notify>) -> Fut,
+              Fut: Future<Output = anyhow::Result<()>> + Send + 'static,
+    {
+        let fut = f(self.shutdown.clone());
+        self.join_set.spawn(fut);
+    }
+
+    pub fn spawn_until_shutdown<F>(&mut self, fut: F)
+    where
+        F: Future<Output = anyhow::Result<()>> + Send + 'static,
+    {
+        self.spawn_until_shutdown_with_teardown(fut, ready(Ok(())))
+    }
+
+    /// run the passed future until shutdown is called, then call the passed teardown future
+    #[track_caller]
+    pub fn spawn_until_shutdown_with_teardown<F, T>(
+        &mut self,
+        fut: F,
+        teardown: T,
+    ) where
+        F: Future<Output = anyhow::Result<()>> + Send + 'static,
+        T: Future<Output = anyhow::Result<()>> + Send + 'static,
+    {
+        let shutdown = self.shutdown.clone();
+        self.join_set.spawn(async move {
+            tokio::select! {
+                _ = shutdown.notified() => {
+                    let ret = teardown.await;
+                    if let Err(ref e) = ret {
+                        let caller = std::panic::Location::caller();
+                        tracing::error!(caller = caller.to_string(), "task teardown returned an error: {e}");
+                    }
+                    ret
+                },
+                ret = fut => ret
+            }
+        });
+    }
+
+    fn new() -> Self {
+        Self { join_set: JoinSet::new(), shutdown: Arc::new(Notify::new()) }
+    }
+
+    pub async fn shutdown(&mut self) -> anyhow::Result<()> {
+        self.shutdown.notify_waiters();
+        while let Some(ret) = self.join_set.join_next().await {
+            ret??
+        }
+
+        Ok(())
+    }
+
+    pub async fn join_next(&mut self) -> anyhow::Result<()> {
+        if let Some(ret) = self.join_set.join_next().await {
+            ret??;
+        }
+        Ok(())
+    }
 }
 
 impl<A, P, S, C> Services<A, P, S, C>
@@ -218,7 +286,7 @@ where
     S: ReplicationLog,
     C: Connector,
 {
-    fn configure(self, join_set: &mut JoinSet<anyhow::Result<()>>) {
+    fn configure(self, task_manager: &mut TaskManager) {
         let user_http = UserApi {
             http_acceptor: self.user_api_config.http_acceptor,
             hrana_ws_acceptor: self.user_api_config.hrana_ws_acceptor,
@@ -233,10 +301,9 @@ where
             enable_console: self.user_api_config.enable_http_console,
             self_url: self.user_api_config.self_url,
             primary_url: self.user_api_config.primary_url,
-            shutdown: self.shutdown.clone(),
         };
 
-        let user_http_service = user_http.configure(join_set);
+        let user_http_service = user_http.configure(task_manager);
 
         if let Some(AdminApiConfig {
             acceptor,
@@ -244,8 +311,7 @@ where
             disable_metrics,
         }) = self.admin_api_config
         {
-            let shutdown = self.shutdown.clone();
-            join_set.spawn(http::admin::run(
+            task_manager.spawn_with_shutdown_notify(|shutdown| http::admin::run(
                 acceptor,
                 user_http_service,
                 self.namespace_store,
@@ -357,7 +423,7 @@ where
 
     fn spawn_monitoring_tasks(
         &self,
-        join_set: &mut JoinSet<anyhow::Result<()>>,
+        task_manager: &mut TaskManager,
         stats_receiver: mpsc::Receiver<(NamespaceName, MetaStoreHandle, Weak<Stats>)>,
     ) -> anyhow::Result<()> {
         match self.heartbeat_config {
@@ -368,7 +434,7 @@ where
                     config.heartbeat_period,
                 );
 
-                self.spawn_until_shutdown_on(join_set, {
+                task_manager.spawn_until_shutdown({
                     let heartbeat_auth = config.heartbeat_auth.clone();
                     let heartbeat_period = config.heartbeat_period;
                     let heartbeat_url = if let Some(url) = &config.heartbeat_url {
@@ -405,7 +471,6 @@ where
         proxy_service: P,
         replication_service: L,
         user_auth_strategy: Auth,
-        shutdown: Arc<Notify>,
     ) -> Services<A, P, L, D> {
         Services {
             namespace_store,
@@ -418,13 +483,12 @@ where
             disable_default_namespace: self.disable_default_namespace,
             db_config: self.db_config,
             user_auth_strategy,
-            shutdown,
         }
     }
 
     pub async fn start(mut self) -> anyhow::Result<()> {
         static INIT: std::sync::Once = std::sync::Once::new();
-        let mut join_set = JoinSet::new();
+        let mut task_manager = TaskManager::new();
 
         if std::env::var("LIBSQL_SQLITE_MIMALLOC").is_ok() {
             setup_sqlite_alloc();
@@ -460,7 +524,7 @@ where
                 let (scripted_backup, script_backup_task) =
                     ScriptBackupManager::new(&self.path, CommandHandler::new(command.to_string()))
                         .await?;
-                self.spawn_until_shutdown_on(&mut join_set, script_backup_task.run());
+                task_manager.spawn_until_shutdown(script_backup_task.run());
                 Some(scripted_backup)
             }
             None => None,
@@ -490,7 +554,7 @@ where
             .make_configurators_and_replication_svc(
                 base_config,
                 client_config.clone(),
-                &mut join_set,
+                &mut task_manager,
                 scheduler_sender.into(),
                 scripted_backup,
             )
@@ -518,7 +582,7 @@ where
         )
         .await?;
 
-        self.spawn_monitoring_tasks(&mut join_set, stats_receiver)?;
+        self.spawn_monitoring_tasks(&mut task_manager, stats_receiver)?;
 
         // if namespaces are enabled, then bottomless must have set DB ID
         if !self.disable_namespaces {
@@ -534,7 +598,7 @@ where
             let proxy_service =
                 ProxyService::new(namespace_store.clone(), None, self.disable_namespaces);
             // Garbage collect proxy clients every 30 seconds
-            self.spawn_until_shutdown_on(&mut join_set, {
+            task_manager.spawn_until_shutdown({
                 let clients = proxy_service.clients();
                 async move {
                     loop {
@@ -551,8 +615,7 @@ where
                 false,
             );
 
-            self.spawn_until_shutdown_on(
-                &mut join_set,
+            task_manager.spawn_until_shutdown(
                 run_rpc_server(
                     proxy_service,
                     config.acceptor,
@@ -572,7 +635,7 @@ where
                 // The migration scheduler is only useful on the primary
                 let meta_conn = metastore_conn_maker()?;
                 let scheduler = Scheduler::new(namespace_store.clone(), meta_conn).await?;
-                self.spawn_until_shutdown_on(&mut join_set, async move {
+                task_manager.spawn_until_shutdown(async move {
                     scheduler.run(scheduler_receiver).await;
                     Ok(())
                 });
@@ -602,7 +665,7 @@ where
                 );
 
                 // Garbage collect proxy clients every 30 seconds
-                self.spawn_until_shutdown_on(&mut join_set, {
+                task_manager.spawn_until_shutdown({
                     let clients = proxy_svc.clients();
                     async move {
                         loop {
@@ -618,9 +681,8 @@ where
                     proxy_svc,
                     replication_svc,
                     user_auth_strategy.clone(),
-                    service_shutdown.clone(),
                 )
-                .configure(&mut join_set);
+                .configure(&mut task_manager);
             }
             DatabaseKind::Replica => {
                 let (channel, uri) = client_config.clone().unwrap();
@@ -639,16 +701,16 @@ where
                     proxy_svc,
                     replication_svc,
                     user_auth_strategy,
-                    service_shutdown.clone(),
                 )
-                .configure(&mut join_set);
+                .configure(&mut task_manager);
             }
         };
 
         tokio::select! {
             _ = shutdown.notified() => {
                 let shutdown = async {
-                    join_set.shutdown().await;
+                    task_manager.shutdown().await?;
+                    // join_set.shutdown().await;
                     service_shutdown.notify_waiters();
                     namespace_store.shutdown().await?;
 
@@ -670,8 +732,8 @@ where
 
                 }
             }
-            Some(res) = join_set.join_next() => {
-                res??;
+            res = task_manager.join_next() => {
+                res?;
             },
             else => (),
         }
@@ -683,7 +745,7 @@ where
         &self,
         base_config: BaseNamespaceConfig,
         client_config: Option<(Channel, Uri)>,
-        join_set: &mut JoinSet<anyhow::Result<()>>,
+        task_manager: &mut TaskManager,
         migration_scheduler_handle: SchedulerHandle,
         scripted_backup: Option<ScriptBackupManager>,
     ) -> anyhow::Result<(NamespaceConfigurators, MakeReplicationSvc)> {
@@ -712,7 +774,7 @@ where
             Some(CustomWAL::LibsqlWal) => self.libsql_wal_configurators(
                 base_config,
                 client_config,
-                join_set,
+                task_manager,
                 migration_scheduler_handle,
                 scripted_backup,
                 wal_path,
@@ -740,7 +802,7 @@ where
         &self,
         base_config: BaseNamespaceConfig,
         client_config: Option<(Channel, Uri)>,
-        join_set: &mut JoinSet<anyhow::Result<()>>,
+        task_manager: &mut TaskManager,
         migration_scheduler_handle: SchedulerHandle,
         scripted_backup: Option<ScriptBackupManager>,
         wal_path: PathBuf,
@@ -780,7 +842,7 @@ where
             };
             let (storage, storage_loop) = AsyncStorage::new(config).await;
 
-            join_set.spawn(async move {
+            task_manager.spawn_with_shutdown_notify(|_| async move {
                 storage_loop.run().await;
                 Ok(())
             });
@@ -796,7 +858,7 @@ where
 
         let registry = Arc::new(WalRegistry::new(wal_path, storage, sender)?);
         let checkpointer = LibsqlCheckpointer::new(registry.clone(), receiver, 8);
-        self.spawn_until_shutdown_on(join_set, async move {
+        task_manager.spawn_with_shutdown_notify(|_| async move {
             checkpointer.run().await;
             Ok(())
         });
@@ -815,9 +877,10 @@ where
             .into()
         });
 
-        self.spawn_until_shutdown_with_teardown(join_set, pending(), {
+        task_manager.spawn_with_shutdown_notify(|shutdown| {
             let registry = registry.clone();
             async move {
+                shutdown.notified().await;
                 registry.shutdown().await?;
                 Ok(())
             }
@@ -934,34 +997,6 @@ where
         Ok((configurators, make_replication_svc))
     }
 
-    fn spawn_until_shutdown_on<F>(&self, join_set: &mut JoinSet<anyhow::Result<()>>, fut: F)
-    where
-        F: Future<Output = anyhow::Result<()>> + Send + 'static,
-    {
-        self.spawn_until_shutdown_with_teardown(join_set, fut, ready(Ok(())))
-    }
-
-    /// run the passed future until shutdown is called, then call the passed teardown future
-    fn spawn_until_shutdown_with_teardown<F, T>(
-        &self,
-        join_set: &mut JoinSet<anyhow::Result<()>>,
-        fut: F,
-        teardown: T,
-    ) where
-        F: Future<Output = anyhow::Result<()>> + Send + 'static,
-        T: Future<Output = anyhow::Result<()>> + Send + 'static,
-    {
-        let shutdown = self.shutdown.clone();
-        join_set.spawn(async move {
-            tokio::select! {
-                _ = shutdown.notified() => {
-                    teardown.await
-                },
-                ret = fut => ret
-            }
-        });
-    }
-
     async fn legacy_configurators(
         &self,
         base_config: BaseNamespaceConfig,
@@ -1062,95 +1097,6 @@ where
             IdleShutdownKicker::new(d, self.initial_idle_shutdown_timeout, shutdown_notify)
         })
     }
-
-    // fn configure_wal_manager(
-    //     &self,
-    //     join_set: &mut JoinSet<anyhow::Result<()>>,
-    // ) -> anyhow::Result<(
-    //     Arc<dyn Fn() -> InnerWalManager + Sync + Send + 'static>,
-    //     Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + Sync + 'static>>,
-    // )> {
-    //     let wal_path = self.path.join("wals");
-    //     let enable_libsql_wal_test = {
-    //         let is_primary = self.rpc_server_config.is_some();
-    //         let is_libsql_wal_test = std::env::var("LIBSQL_WAL_TEST").is_ok();
-    //         is_primary && is_libsql_wal_test
-    //     };
-    //     let use_libsql_wal =
-    //         self.use_custom_wal == Some(CustomWAL::LibsqlWal) || enable_libsql_wal_test;
-    //     if !use_libsql_wal {
-    //         if wal_path.try_exists()? {
-    //             anyhow::bail!("database was previously setup to use libsql-wal");
-    //         }
-    //     }
-    //
-    //     if self.use_custom_wal.is_some() {
-    //         if self.db_config.bottomless_replication.is_some() {
-    //             anyhow::bail!("bottomless not supported with custom WAL");
-    //         }
-    //         if self.rpc_client_config.is_some() {
-    //             anyhow::bail!("custom WAL not supported in replica mode");
-    //         }
-    //     }
-    //
-    //     let namespace_resolver = |path: &Path| {
-    //         NamespaceName::from_string(
-    //             path.parent()
-    //                 .unwrap()
-    //                 .file_name()
-    //                 .unwrap()
-    //                 .to_str()
-    //                 .unwrap()
-    //                 .to_string(),
-    //         )
-    //         .unwrap()
-    //         .into()
-    //     };
-    //
-    //     match self.use_custom_wal {
-    //         Some(CustomWAL::LibsqlWal) => {
-    //             let (sender, receiver) = tokio::sync::mpsc::channel(64);
-    //             let registry = Arc::new(WalRegistry::new(wal_path, SqldStorage, sender)?);
-    //             let checkpointer = LibsqlCheckpointer::new(registry.clone(), receiver, 8);
-    //             join_set.spawn(async move {
-    //                 checkpointer.run().await;
-    //                 Ok(())
-    //             });
-    //
-    //             let wal = LibsqlWalManager::new(registry.clone(), Arc::new(namespace_resolver));
-    //             let shutdown_notify = self.shutdown.clone();
-    //             let shutdown_fut = Box::pin(async move {
-    //                 shutdown_notify.notified().await;
-    //                 registry.shutdown().await?;
-    //                 Ok(())
-    //             });
-    //
-    //             tracing::info!("using libsql wal");
-    //             Ok((Arc::new(move || EitherWAL::B(wal.clone())), shutdown_fut))
-    //         }
-    //         #[cfg(feature = "durable-wal")]
-    //         Some(CustomWAL::DurableWal) => {
-    //             tracing::info!("using durable wal");
-    //             let lock_manager = Arc::new(std::sync::Mutex::new(LockManager::new()));
-    //             let wal = DurableWalManager::new(
-    //                 lock_manager,
-    //                 namespace_resolver,
-    //                 self.storage_server_address.clone(),
-    //             );
-    //             Ok((
-    //                 Arc::new(move || EitherWAL::C(wal.clone())),
-    //                 Box::pin(ready(Ok(()))),
-    //             ))
-    //         }
-    //         None => {
-    //             tracing::info!("using sqlite3 wal");
-    //             Ok((
-    //                 Arc::new(|| EitherWAL::A(Sqlite3WalManager::default())),
-    //                 Box::pin(ready(Ok(()))),
-    //             ))
-    //         }
-    //     }
-    // }
 
     async fn get_client_config(&self) -> anyhow::Result<Option<(Channel, hyper::Uri)>> {
         match self.rpc_client_config {

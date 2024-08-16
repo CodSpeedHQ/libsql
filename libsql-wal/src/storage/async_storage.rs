@@ -49,6 +49,7 @@ where
     pub async fn run(mut self) {
         let mut shutting_down = false;
         let mut in_flight_futs = JoinSet::new();
+        let mut notify_shutdown = None;
         // run the loop until shutdown.
         loop {
             if shutting_down && self.scheduler.is_empty() {
@@ -91,6 +92,12 @@ where
                         Some(StorageLoopMessage::DurableFrameNoReq { namespace, ret, config_override }) => {
                             self.fetch_durable_frame_no_async(namespace, ret, config_override);
                         }
+                        Some(StorageLoopMessage::Shutdown(ret)) => {
+                            dbg!();
+                            notify_shutdown.replace(ret);
+                            shutting_down = true;
+                            tracing::info!("Storage shutting down");
+                        }
                         None => {
                             shutting_down = true;
                         }
@@ -106,6 +113,11 @@ where
                     }
                 }
             }
+        }
+
+        tracing::info!("Storage shutdown");
+        if let Some(notify) = notify_shutdown {
+            let _ = notify.send(());
         }
     }
 
@@ -146,6 +158,7 @@ enum StorageLoopMessage<S, C> {
         config_override: Option<C>,
         ret: oneshot::Sender<super::Result<u64>>,
     },
+    Shutdown(oneshot::Sender<()>),
 }
 
 pub struct AsyncStorage<B: Backend, S> {
@@ -162,6 +175,13 @@ where
 {
     type Segment = S;
     type Config = B::Config;
+
+    async fn shutdown(&self) {
+        dbg!();
+        let (snd, rcv) = oneshot::channel();
+        let _ = self.job_sender.send(StorageLoopMessage::Shutdown(snd));
+        let _ = rcv.await;
+    }
 
     fn store(
         &self,
@@ -258,6 +278,7 @@ where
         let segment = CompactedSegment::open(file).await?;
         Ok(segment)
     }
+
 }
 
 pub struct AsyncStorageInitConfig<B> {
