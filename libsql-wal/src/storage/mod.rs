@@ -186,7 +186,7 @@ pub trait Storage: Send + Sync + 'static {
         config_override: Option<Self::Config>,
     ) -> impl Future<Output = Result<CompactedSegment<impl FileExt>>> + Send;
 
-    fn shutdown(&self) -> impl Future<Output = ()> + Send { async { dbg!(()) } }
+    fn shutdown(&self) -> impl Future<Output = ()> + Send { async { () } }
 }
 
 /// special zip function for Either storage implementation

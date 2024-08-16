@@ -121,7 +121,6 @@ where
     pub async fn run(mut self) {
         loop {
             if self.should_exit() {
-                dbg!();
                 tracing::info!("checkpointer exited cleanly.");
                 return;
             }

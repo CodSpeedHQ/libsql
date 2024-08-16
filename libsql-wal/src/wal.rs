@@ -6,7 +6,7 @@ use std::sync::Arc;
 use libsql_sys::name::NamespaceResolver;
 use libsql_sys::wal::{Wal, WalManager};
 
-use crate::io::Io;
+use crate::io::{FileExt as _, Io};
 use crate::registry::WalRegistry;
 use crate::segment::sealed::SealedSegment;
 use crate::shared_wal::SharedWal;

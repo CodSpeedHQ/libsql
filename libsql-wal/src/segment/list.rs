@@ -161,6 +161,8 @@ where
             log_id: log_id.as_u128().into(),
         };
 
+        db_file.set_len(size_after as u64 * LIBSQL_PAGE_SIZE as u64)?;
+
         let footer_offset = size_after as usize * LIBSQL_PAGE_SIZE as usize;
         let (_, ret) = db_file
             .write_all_at_async(ZeroCopyBuf::new_init(footer), footer_offset as u64)
@@ -168,7 +170,6 @@ where
         ret?;
 
         // todo: truncate if necessary
-
         //// TODO: make async
         db_file.sync_all()?;
 
@@ -195,8 +196,6 @@ where
         }
 
         self.len.fetch_sub(segs.len(), Ordering::Relaxed);
-
-        db_file.set_len(size_after as u64 * 4096)?;
 
         Ok(Some(last_replication_index))
     }

@@ -93,7 +93,6 @@ where
                             self.fetch_durable_frame_no_async(namespace, ret, config_override);
                         }
                         Some(StorageLoopMessage::Shutdown(ret)) => {
-                            dbg!();
                             notify_shutdown.replace(ret);
                             shutting_down = true;
                             tracing::info!("Storage shutting down");
@@ -177,7 +176,6 @@ where
     type Config = B::Config;
 
     async fn shutdown(&self) {
-        dbg!();
         let (snd, rcv) = oneshot::channel();
         let _ = self.job_sender.send(StorageLoopMessage::Shutdown(snd));
         let _ = rcv.await;

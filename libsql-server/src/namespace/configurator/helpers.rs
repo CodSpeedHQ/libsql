@@ -362,11 +362,11 @@ pub(super) async fn make_stats(
         }
     });
 
-    join_set.spawn(run_storage_monitor(
-        db_path.into(),
-        Arc::downgrade(&stats),
-        encryption_config,
-    ));
+    // join_set.spawn(run_storage_monitor(
+    //     db_path.into(),
+    //     Arc::downgrade(&stats),
+    //     encryption_config,
+    // ));
 
     tracing::debug!("done sending stats, and creating bg tasks");
 

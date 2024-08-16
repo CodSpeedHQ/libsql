@@ -265,8 +265,6 @@ impl<IO: Io> S3Backend<IO> {
             }
 
             let next_frame_no = header.start_frame_no.get() - 1;
-            dbg!(next_frame_no);
-            dbg!((seen.len(), db_size));
             let Some(key) = self
                 .find_segment_inner(config, &folder_key, next_frame_no)
                 .await?
