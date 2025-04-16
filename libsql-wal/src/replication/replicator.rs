@@ -139,8 +139,6 @@ impl<IO: Io> Replicator<IO> {
 
 #[cfg(test)]
 mod test {
-    use std::time::Duration;
-
     use tempfile::NamedTempFile;
     use tokio_stream::StreamExt;
 
