@@ -10935,6 +10935,10 @@ SQLITE_API int sqlite3_preupdate_blobwrite(sqlite3 *);
 */
 SQLITE_API void *libsql_close_hook(sqlite3 *db, void (*xClose)(void *pCtx, sqlite3 *db), void *arg);
 
+SQLITE_API int libsql_wal_frame_count(sqlite3*, unsigned int*);
+
+SQLITE_API int libsql_wal_get_frame(sqlite3*, unsigned int, void*, unsigned int);
+
 /*
 ** CAPI3REF: Low-level system error code
 ** METHOD: sqlite3
@@ -13960,6 +13964,7 @@ typedef struct libsql_wal_methods {
   /* Read a page from the write-ahead log, if it is present. */
   int (*xFindFrame)(wal_impl* pWal, unsigned int, unsigned int *);
   int (*xReadFrame)(wal_impl* pWal, unsigned int, int, unsigned char *);
+  int (*xReadFrameRaw)(wal_impl* pWal, unsigned int, int, unsigned char *);
 
   /* If the WAL is not empty, return the size of the database. */
   unsigned int (*xDbsize)(wal_impl* pWal);
@@ -16375,6 +16380,9 @@ SQLITE_PRIVATE int sqlite3PagerReadFileheader(Pager*, int, unsigned char*);
 SQLITE_PRIVATE void sqlite3PagerSetBusyHandler(Pager*, int(*)(void *), void *);
 SQLITE_PRIVATE int sqlite3PagerSetPagesize(Pager*, u32*, int);
 SQLITE_PRIVATE Pgno sqlite3PagerMaxPageCount(Pager*, Pgno);
+SQLITE_PRIVATE unsigned int sqlite3PagerWalFrameCount(Pager *);
+SQLITE_PRIVATE int sqlite3PagerWalReadFrame(Pager *, unsigned int, void *, unsigned int);
+
 SQLITE_PRIVATE void sqlite3PagerSetCachesize(Pager*, int);
 SQLITE_PRIVATE int sqlite3PagerSetSpillsize(Pager*, int);
 SQLITE_PRIVATE void sqlite3PagerSetMmapLimit(Pager *, sqlite3_int64);
@@ -57270,6 +57278,7 @@ typedef struct libsql_wal_methods {
   /* Read a page from the write-ahead log, if it is present. */
   int (*xFindFrame)(wal_impl* pWal, unsigned int, unsigned int *);
   int (*xReadFrame)(wal_impl* pWal, unsigned int, int, unsigned char *);
+  int (*xReadFrameRaw)(wal_impl* pWal, unsigned int, int, unsigned char *);
 
   /* If the WAL is not empty, return the size of the database. */
   unsigned int (*xDbsize)(wal_impl* pWal);
@@ -65214,6 +65223,33 @@ SQLITE_PRIVATE int sqlite3PagerCloseWal(Pager *pPager, sqlite3 *db){
   return rc;
 }
 
+SQLITE_PRIVATE unsigned int sqlite3PagerWalFrameCount(Pager *pPager){
+  if( pagerUseWal(pPager) ){
+    // TODO: We are under sqlite3 mutex, but do we need something else?
+    struct sqlite3_wal* pWal = (void*) pPager->wal->pData;
+    return pWal->hdr.mxFrame;
+  }else{
+    return 0;
+  }
+}
+
+SQLITE_PRIVATE int sqlite3PagerWalReadFrameRaw(
+  Pager *pPager,
+  unsigned int iFrame,
+  void *pFrameOut,
+  unsigned int nFrameOutLen
+){
+  if( pagerUseWal(pPager) ){
+    unsigned int nFrameLen = 24+pPager->pageSize;
+    if( nFrameOutLen!=nFrameLen ) return SQLITE_MISUSE;
+    return pPager->wal->methods.xReadFrameRaw(pPager->wal->pData, iFrame, pPager->pageSize, pFrameOut);
+  }else{
+    return SQLITE_ERROR;
+  }
+}
+
+  int (*xReadFrame)(wal_impl* pWal, unsigned int, int, unsigned char *);
+
 #ifdef SQLITE_ENABLE_SETLK_TIMEOUT
 /*
 ** If pager pPager is a wal-mode database not in exclusive locking mode,
@@ -67601,9 +67637,10 @@ static int sqlite3WalClose(
       if( pWal->exclusiveMode==WAL_NORMAL_MODE ){
         pWal->exclusiveMode = WAL_EXCLUSIVE_MODE;
       }
-      rc = sqlite3WalCheckpoint(pWal, db,
-          SQLITE_CHECKPOINT_PASSIVE, 0, 0, sync_flags, nBuf, zBuf, 0, 0, NULL, NULL
-      );
+      rc = SQLITE_ERROR;
+      //rc = sqlite3WalCheckpoint(pWal, db,
+      //    SQLITE_CHECKPOINT_PASSIVE, 0, 0, sync_flags, nBuf, zBuf, 0, 0, NULL, NULL
+      //);
       if( rc==SQLITE_OK ){
         int bPersist = -1;
         sqlite3OsFileControlHint(
@@ -68732,6 +68769,28 @@ static int sqlite3WalReadFrame(
 }
 
 /*
+** Read the contents of frame iRead from the wal file into buffer pOut
+** (which is nOut bytes in size). Return SQLITE_OK if successful, or an
+** error code otherwise.
+*/
+static int sqlite3WalReadFrameRaw(
+  Wal *pWal,                      /* WAL handle */
+  u32 iRead,                      /* Frame to read */
+  int nOut,                       /* Size of buffer pOut in bytes */
+  u8 *pOut                        /* Buffer to write page data to */
+){
+  int sz;
+  i64 iOffset;
+  sz = pWal->hdr.szPage;
+  sz = (sz&0xfe00) + ((sz&0x0001)<<16);
+  testcase( sz<=32768 );
+  testcase( sz>=65536 );
+  iOffset = walFrameOffset(iRead, sz);
+  /* testcase( IS_BIG_INT(iOffset) ); // requires a 4GiB WAL */
+  return sqlite3OsRead(pWal->pWalFd, pOut, (nOut>sz ? sz : nOut), iOffset);
+}
+
+/*
 ** Return the size of the database in pages (or zero, if unknown).
 */
 static Pgno sqlite3WalDbsize(Wal *pWal){
@@ -69840,6 +69899,7 @@ static int sqlite3WalOpen(
     out->methods.xEndReadTransaction = (void (*)(wal_impl *))sqlite3WalEndReadTransaction;
     out->methods.xFindFrame = (int (*)(wal_impl *, unsigned int, unsigned int *))sqlite3WalFindFrame;
     out->methods.xReadFrame = (int (*)(wal_impl *, unsigned int, int, unsigned char *))sqlite3WalReadFrame;
+    out->methods.xReadFrameRaw = (int (*)(wal_impl *, unsigned int, int, unsigned char *))sqlite3WalReadFrameRaw;
     out->methods.xDbsize = (unsigned int (*)(wal_impl *))sqlite3WalDbsize;
     out->methods.xBeginWriteTransaction = (int (*)(wal_impl *))sqlite3WalBeginWriteTransaction;
     out->methods.xEndWriteTransaction = (int (*)(wal_impl *))sqlite3WalEndWriteTransaction;
@@ -182863,6 +182923,62 @@ void *libsql_close_hook(
   db->pCloseArg = pArg;
   sqlite3_mutex_leave(db->mutex);
   return pRet;
+}
+
+/*
+** Return the number of frames in the WAL of the given database.
+*/
+int libsql_wal_frame_count(
+  sqlite3* db,
+  unsigned int *pnFrame
+){
+  int rc = SQLITE_OK;
+  Pager *pPager;
+
+#ifdef SQLITE_OMIT_WAL
+  *pnFrame = 0;
+  return SQLITE_OK;
+#else
+#ifdef SQLITE_ENABLE_API_ARMOR
+  if( !sqlite3SafetyCheckOk(db) ) return SQLITE_MISUSE_BKPT;
+#endif
+
+  sqlite3_mutex_enter(db->mutex);
+  pPager = sqlite3BtreePager(db->aDb[0].pBt);
+  *pnFrame = sqlite3PagerWalFrameCount(pPager);
+  sqlite3_mutex_leave(db->mutex);
+
+  return rc;
+#endif
+}
+
+int libsql_wal_get_frame(
+  sqlite3* db,
+  unsigned int iFrame,
+  void *pBuf,
+  unsigned int nBuf
+){
+  int rc = SQLITE_OK;
+  Pager *pPager;
+
+#ifdef SQLITE_OMIT_WAL
+  UNUSED_PARAMETER(iFrame);
+  UNUSED_PARAMETER(nBuf);
+  UNUSED_PARAMETER(pBuf);
+  return SQLITE_OK;
+#else
+
+#ifdef SQLITE_ENABLE_API_ARMOR
+  if( !sqlite3SafetyCheckOk(db) ) return SQLITE_MISUSE_BKPT;
+#endif
+
+    sqlite3_mutex_enter(db->mutex);
+    pPager = sqlite3BtreePager(db->aDb[0].pBt);
+    rc = sqlite3PagerWalReadFrameRaw(pPager, iFrame, pBuf, nBuf);
+    sqlite3_mutex_leave(db->mutex);
+
+    return rc;
+#endif
 }
 
 /*
